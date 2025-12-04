@@ -1,0 +1,5 @@
+.DS_Store
+.idea/
+locus-app/node_modules/
+locus-app/dist/
+locus-app/out/

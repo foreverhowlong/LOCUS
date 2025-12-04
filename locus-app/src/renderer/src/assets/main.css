@@ -1,0 +1,18 @@
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,200..900;1,200..900&family=Inter:wght@100..900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-porcelain: #F9F7F1;
+  --color-stone: #F5F5F7;
+  --color-charcoal: #333333;
+  --color-indigo-muted: #4A5D88;
+
+  --font-serif: "Crimson Pro", serif;
+  --font-sans: "Inter", sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-porcelain text-charcoal font-serif;
+  }
+}
