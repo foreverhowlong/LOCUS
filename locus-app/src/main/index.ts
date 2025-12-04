@@ -3,6 +3,14 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
+// Dynamic import for ESM-only package
+let store: any
+
+async function initStore() {
+  const { default: Store } = await import('electron-store')
+  store = new Store()
+}
+
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
@@ -13,7 +21,8 @@ function createWindow(): void {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      webSecurity: false // Disable webSecurity to allow CORS requests to arbitrary APIs
     }
   })
 
@@ -38,7 +47,9 @@ function createWindow(): void {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await initStore()
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -51,6 +62,15 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+
+  // Settings IPC
+  ipcMain.handle('settings:get', (_event, key) => {
+    return store.get(key)
+  })
+
+  ipcMain.handle('settings:set', (_event, key, value) => {
+    store.set(key, value)
+  })
 
   createWindow()
 
