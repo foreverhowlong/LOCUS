@@ -2,6 +2,7 @@
 
 **Locus** is a local-first, AI-powered e-reader designed for deep reading ("Exegesis").
 
+![img.png](preview.png)
 ## Features Implemented (MVP)
 
 *   **Digital Neo-Classic Design**: A distraction-free interface with "Porcelain" background and serif typography (Crimson Pro).
