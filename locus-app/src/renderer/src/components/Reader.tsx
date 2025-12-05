@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import ePub from 'epubjs'
 import type { Book, Rendition } from 'epubjs'
 import { useBookStore } from '../store/useBookStore'
-import { ChevronLeft, ChevronRight, BookOpen, X, List, Settings } from 'lucide-react' // Added Settings icon
+import { ChevronLeft, ChevronRight, BookOpen, X, List, Settings, Sparkles, Send } from 'lucide-react'
 import { ActionMenu } from './ActionMenu'
 import { TableOfContents } from './TableOfContents'
 import { SettingsModal } from './SettingsModal'
@@ -13,6 +13,11 @@ import { useSettingsStore } from '../store/useSettingsStore'
 import ReactMarkdown from 'react-markdown'
 // @ts-ignore
 import remarkGfm from 'remark-gfm'
+
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
 
 export function Reader() {
   const { 
@@ -29,44 +34,81 @@ export function Reader() {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
   const [isSettingsOpen, setSettingsOpen] = useState(false)
   
-  const [aiResponse, setAiResponse] = useState('')
+  // AI & Chat State
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const [streamingContent, setStreamingContent] = useState('')
   const [isAiLoading, setIsAiLoading] = useState(false)
+  const [userInput, setUserInput] = useState('')
+
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [chatHistory, streamingContent])
   
+  // Helper to call AI Service
+  const callAI = async (messages: ChatMessage[]) => {
+      if (!apiKey) return
+      setIsAiLoading(true)
+      setStreamingContent('')
+      
+      const systemPrompt = SYSTEM_PROMPT_BASE
+      
+      const request = {
+          provider,
+          apiKey,
+          baseUrl: customBaseUrl,
+          model: provider === 'custom' ? customModelName : geminiModelName,
+          systemPrompt,
+          messages: messages
+      }
+
+      let fullResponse = ''
+      try {
+          for await (const chunk of streamAIResponse(request)) {
+              setStreamingContent(prev => prev + chunk)
+              fullResponse += chunk
+          }
+          // Append complete assistant message to history
+          setChatHistory(prev => [...prev, { role: 'assistant', content: fullResponse }])
+          setStreamingContent('')
+      } catch (e) {
+          console.error(e)
+          setChatHistory(prev => [...prev, { role: 'assistant', content: "Error connecting to the Passionate Professor." }])
+      } finally {
+          setIsAiLoading(false)
+      }
+  }
+
   // Trigger AI when Lens is selected
   useEffect(() => {
     if (activeLens && activeSelection && apiKey) {
-      const fetchAI = async () => {
-        setIsAiLoading(true)
-        setAiResponse('')
-        
-        const systemPrompt = SYSTEM_PROMPT_BASE
-        const userPrompt = getLensPrompt(activeLens, activeSelection.text, metadata?.title || 'Unknown Book')
-        
-        const request = {
-            provider,
-            apiKey,
-            baseUrl: customBaseUrl,
-            model: provider === 'custom' ? customModelName : geminiModelName,
-            systemPrompt,
-            userPrompt
-        }
-
-        try {
-            for await (const chunk of streamAIResponse(request)) {
-                setAiResponse(prev => prev + chunk)
-            }
-        } catch (e) {
-            console.error(e)
-            setAiResponse("Error connecting to the Passionate Professor.")
-        } finally {
-            setIsAiLoading(false)
-        }
-      }
-      fetchAI()
+       // Start new session
+       const prompt = getLensPrompt(activeLens, activeSelection.text, metadata?.title || 'Unknown Book')
+       const initialMessage: ChatMessage = { role: 'user', content: prompt }
+       
+       setChatHistory([initialMessage])
+       callAI([initialMessage])
     } else if (activeLens && !apiKey) {
-        setAiResponse("Please configure your API Key in Settings to consult the Professor.")
+        setChatHistory([{ role: 'assistant', content: "Please configure your API Key in Settings to consult the Professor." }])
     }
   }, [activeLens, activeSelection, apiKey, provider, customBaseUrl, customModelName, geminiModelName, metadata])
+
+  const handleSendMessage = async () => {
+      if (!userInput.trim() || isAiLoading) return
+      
+      const newUserMsg: ChatMessage = { role: 'user', content: userInput }
+      const newHistory = [...chatHistory, newUserMsg]
+      
+      setChatHistory(newHistory)
+      setUserInput('')
+      
+      await callAI(newHistory)
+  }
 
   useEffect(() => {
     if (!bookData || !viewerRef.current) return
@@ -82,7 +124,7 @@ export function Reader() {
       height: '100%',
       flow: 'paginated',
       manager: 'default',
-      allowScriptedContent: true, // Allow scripts for interactivity
+      allowScriptedContent: true, 
     })
     renditionRef.current = rendition
 
@@ -94,7 +136,6 @@ export function Reader() {
     })
 
     // Theme / Styling
-
     rendition.themes.register('neoclassic', {
       body: { 
         'font-family': '"Crimson Pro", serif', 
@@ -122,36 +163,65 @@ export function Reader() {
       setToc(navigation.toc)
     })
 
+    // --- Event Handling Refactor ---
 
-    // Selection Handling
-    rendition.on('selected', (cfiRange: string, contents: any) => {
-      const range = contents.range(cfiRange)
-      const rect = range.getBoundingClientRect()
-      const iframe = viewerRef.current?.querySelector('iframe')
-      
-      if (iframe) {
-        const iframeRect = iframe.getBoundingClientRect()
-        setMenuPos({
-          x: rect.left + iframeRect.left + rect.width / 2,
-          y: rect.top + iframeRect.top
-        })
+    // We use hooks to attach listeners directly to the iframe document
+    rendition.hooks.content.register((contents: any) => {
+        const doc = contents.document
         
-        setSelection({
-          cfi: cfiRange,
-          text: range.toString()
+        // 1. Selection Handling (Fix Flickering)
+        // Listen for mouseup to detect end of selection drag
+        doc.addEventListener('mouseup', (_: MouseEvent) => {
+            const selection = doc.getSelection()
+            
+            // If we have a valid text selection
+            if (selection && selection.toString().trim().length > 0) {
+                 const range = selection.getRangeAt(0)
+                 const rect = range.getBoundingClientRect()
+                 const iframe = viewerRef.current?.querySelector('iframe')
+                 
+                 if (iframe) {
+                    const iframeRect = iframe.getBoundingClientRect()
+                    
+                    // Calculate position
+                    setMenuPos({
+                      x: rect.left + iframeRect.left + rect.width / 2,
+                      y: rect.top + iframeRect.top
+                    })
+                    
+                    // Get CFI for persistence
+                    const cfi = contents.cfiFromRange(range)
+                    
+                    setSelection({
+                      cfi: cfi,
+                      text: selection.toString()
+                    })
+                    
+                    setLens(null)
+                 }
+            } else {
+                // If clicked without selecting, clear menu
+                setMenuPos(null)
+            }
         })
-        
-        // Clear existing lens when new selection is made
-        setLens(null)
-      }
+
+        // 2. Keyboard Navigation (Fix Focus Trap)
+        // Forward key events from iframe to main window handler
+        doc.addEventListener('keydown', (e: KeyboardEvent) => {
+            // Custom event to bubble up or just call handler directly if accessible
+            // We'll dispatch to main window
+            const event = new KeyboardEvent('keydown', {
+                key: e.key,
+                code: e.code,
+                bubbles: true,
+                cancelable: true
+            })
+            document.dispatchEvent(event)
+        })
     })
 
     rendition.on('relocated', (location: any) => {
       setLocation(location.start.cfi)
-      setMenuPos(null)
-    })
-
-    rendition.on('click', () => {
       setMenuPos(null)
     })
 
@@ -163,7 +233,14 @@ export function Reader() {
     }
   }, [bookData, setMetadata, setLocation, setSelection, setLens, setToc])
 
+  // Updated Global Key Handler
   const handleKeyPress = useCallback((event: KeyboardEvent) => {
+    // Input Guard
+    const activeTag = document.activeElement?.tagName
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') {
+      return
+    }
+
     if (renditionRef.current) {
       if (event.key === 'ArrowLeft') {
         renditionRef.current.prev()
@@ -174,9 +251,9 @@ export function Reader() {
   }, [])
 
   useEffect(() => {
-    document.addEventListener('keydown', handleKeyPress)
+    window.addEventListener('keydown', handleKeyPress)
     return () => {
-      document.removeEventListener('keydown', handleKeyPress)
+        window.removeEventListener('keydown', handleKeyPress)
     }
   }, [handleKeyPress])
 
@@ -188,8 +265,8 @@ export function Reader() {
   const clearLens = () => {
       setLens(null)
       setSelection(null)
-      // Ideally clear selection in epubjs too: renditionRef.current?.getContents()[0].window.getSelection().removeAllRanges()
-      // But accessing contents is tricky without reference.
+      setChatHistory([])
+      setStreamingContent('')
   }
 
   const prevPage = () => renditionRef.current?.prev()
@@ -197,10 +274,42 @@ export function Reader() {
 
   const handleTocNavigate = (href: string) => {
     renditionRef.current?.display(href)
-    setTocOpen(false) // Close TOC after navigation
+    setTocOpen(false) 
   }
 
+  // Updated Lantern Logic
+  const handleLantern = async () => {
+      if (!renditionRef.current) return
+      
+      try {
+          // Get current visible range
+          const visibleRange = renditionRef.current.getRange(renditionRef.current.location.start.cfi)
+          let textContext = ""
+          
+          if (visibleRange) {
+             textContext = visibleRange.toString()
+          }
+          
+          // Fallback: specific to epubjs if range is tricky
+          if (!textContext || textContext.length < 50) {
+             // Try getting text from the view manager
+             // @ts-ignore
+             const contents = renditionRef.current.getContents()[0]
+             if (contents) {
+                 textContext = contents.document.body.innerText
+             }
+          }
 
+          setSelection({
+              cfi: renditionRef.current.location.start.cfi,
+              text: textContext || "Page Context"
+          })
+          setLens('discovery')
+          
+      } catch (e) {
+          console.error("Error getting text for Lantern:", e)
+      }
+  }
 
 
   return (
@@ -249,6 +358,18 @@ export function Reader() {
                <ChevronRight size={24} />
              </button>
              
+             {/* Lantern Discovery Button (Subtle) */}
+             <button
+                 onClick={handleLantern}
+                 className="absolute bottom-4 right-6 z-30 flex items-center space-x-2 rounded-lg p-2 text-stone-400 hover:bg-stone-200/50 hover:text-indigo-muted transition-all duration-300 group"
+                 title="Discovery Lens (Scan Page)"
+             >
+                 <span className="text-[10px] font-medium uppercase tracking-widest opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all">
+                    Scan Page
+                 </span>
+                 <Sparkles size={18} className="opacity-70 group-hover:opacity-100" />
+             </button>
+
              {/* Action Menu */}
              <ActionMenu position={menuPos} onSelect={handleLensSelect} />
 
@@ -285,32 +406,64 @@ export function Reader() {
                          </p>
                     </div>
 
-                    {/* AI Response */}
-                    <div className="space-y-4">
-                        {isAiLoading && !aiResponse && (
+                    {/* Chat History */}
+                    <div className="space-y-6">
+                        {chatHistory.map((msg, index) => (
+                            (index === 0 && msg.role === 'user') ? null : (
+                                <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                    <div className={`max-w-[90%] ${msg.role === 'user' ? 'bg-stone-200 px-3 py-2 rounded-lg text-sm text-charcoal' : 'prose prose-stone prose-sm max-w-none font-sans text-charcoal prose-headings:font-serif prose-headings:font-medium prose-p:leading-relaxed prose-strong:text-indigo-muted prose-a:text-indigo-muted'}`}>
+                                         {msg.role === 'user' ? (
+                                             msg.content
+                                         ) : (
+                                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                {msg.content}
+                                             </ReactMarkdown>
+                                         )}
+                                    </div>
+                                </div>
+                            )
+                        ))}
+                        
+                        {/* Streaming Content */}
+                        {streamingContent && (
+                             <div className="flex flex-col items-start">
+                                <div className="prose prose-stone prose-sm max-w-none font-sans text-charcoal prose-headings:font-serif prose-headings:font-medium prose-p:leading-relaxed prose-strong:text-indigo-muted prose-a:text-indigo-muted">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {streamingContent}
+                                    </ReactMarkdown>
+                                </div>
+                             </div>
+                        )}
+
+                        {isAiLoading && !streamingContent && (
                              <div className="flex items-center space-x-3 text-indigo-muted animate-pulse p-2">
                                 <div className="h-2 w-2 rounded-full bg-indigo-muted" />
                                 <span className="text-xs font-medium tracking-wide uppercase">Consulting the Codex...</span>
                             </div>
                         )}
-                        
-                        {aiResponse ? (
-                            <div className="prose prose-stone prose-sm max-w-none font-sans text-charcoal prose-headings:font-serif prose-headings:font-medium prose-p:leading-relaxed prose-strong:text-indigo-muted prose-a:text-indigo-muted hover:prose-a:text-indigo-600">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {aiResponse}
-                                </ReactMarkdown>
-                            </div>
-                        ) : null}
+                        <div ref={messagesEndRef} />
                     </div>
                 </div>
                 
                  {/* Input Area */}
                  <div className="p-4 bg-white border-t border-stone-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-10">
-                    <input 
-                        type="text" 
-                        placeholder="Ask a follow-up question..." 
-                        className="w-full rounded-lg border border-stone-200 bg-stone-50 px-4 py-3 font-sans text-sm text-charcoal placeholder:text-stone-400 focus:border-indigo-muted focus:outline-none focus:ring-1 focus:ring-indigo-muted transition-all"
-                    />
+                    <div className="relative flex items-center">
+                        <input 
+                            type="text" 
+                            value={userInput}
+                            onChange={(e) => setUserInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                            placeholder="Ask a follow-up question..." 
+                            className="w-full rounded-lg border border-stone-200 bg-stone-50 px-4 py-3 pr-10 font-sans text-sm text-charcoal placeholder:text-stone-400 focus:border-indigo-muted focus:outline-none focus:ring-1 focus:ring-indigo-muted transition-all"
+                        />
+                        <button 
+                            onClick={handleSendMessage}
+                            disabled={!userInput.trim() || isAiLoading}
+                            className="absolute right-2 p-2 text-indigo-muted hover:bg-stone-100 rounded-full disabled:opacity-50 transition"
+                        >
+                            <Send size={16} />
+                        </button>
+                    </div>
                  </div>
              </div>
          ) : (
@@ -321,7 +474,7 @@ export function Reader() {
                 <div className="space-y-2">
                   <h2 className="font-serif text-xl font-medium text-charcoal">Marginalia</h2>
                   <p className="font-sans text-sm text-stone-500 max-w-[200px] mx-auto leading-relaxed">
-                    Highlight text in the book to unlock the hermeneutic lenses.
+                    Highlight text or use the Discovery Lens <Sparkles size={12} className="inline" /> to unlock the hermeneutic lenses.
                   </p>
                 </div>
              </div>

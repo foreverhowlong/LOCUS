@@ -4,22 +4,29 @@ interface AIRequest {
   baseUrl?: string | null
   model?: string | null
   systemPrompt: string
-  userPrompt: string
+  userPrompt?: string
+  messages?: { role: string; content: string }[]
 }
 
 export async function* streamAIResponse(request: AIRequest): AsyncGenerator<string, void, unknown> {
-  const { provider, apiKey, baseUrl, model, systemPrompt, userPrompt } = request
+  const { provider, apiKey, baseUrl, model, systemPrompt, userPrompt, messages } = request
 
   if (!apiKey && provider !== 'custom') {
     yield "Error: API Key is missing. Please configure it in Settings."
     return
   }
 
+  // Normalize messages
+  const conversation = messages || []
+  if (userPrompt) {
+      conversation.push({ role: 'user', content: userPrompt })
+  }
+
   try {
     if (provider === 'openai' || provider === 'custom') {
-      yield* streamOpenAICompatible(apiKey || '', baseUrl, model, systemPrompt, userPrompt)
+      yield* streamOpenAICompatible(apiKey || '', baseUrl, model, systemPrompt, conversation)
     } else if (provider === 'gemini') {
-        yield* streamGemini(apiKey || '', model || 'gemini-1.5-flash', systemPrompt, userPrompt)
+        yield* streamGemini(apiKey || '', model || 'gemini-1.5-flash', systemPrompt, conversation)
     } else if (provider === 'anthropic') {
         yield "Anthropic integration is coming soon."
     }
@@ -36,11 +43,16 @@ async function* streamOpenAICompatible(
   baseUrl: string | null | undefined, 
   model: string | null | undefined, 
   systemPrompt: string, 
-  userPrompt: string
+  messages: { role: string; content: string }[]
 ): AsyncGenerator<string, void, unknown> {
   
   const url = baseUrl ? `${baseUrl}/chat/completions` : 'https://api.openai.com/v1/chat/completions'
   const targetModel = model || 'gpt-4o'
+
+  const apiMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages
+  ]
 
   const response = await fetch(url, {
     method: 'POST',
@@ -50,10 +62,7 @@ async function* streamOpenAICompatible(
     },
     body: JSON.stringify({
       model: targetModel,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
+      messages: apiMessages,
       stream: true
     })
   })
@@ -93,71 +102,22 @@ async function* streamOpenAICompatible(
   }
 }
 
-async function* streamGemini(apiKey: string, model: string, systemPrompt: string, userPrompt: string): AsyncGenerator<string, void, unknown> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`
+async function* streamGemini(apiKey: string, model: string, systemPrompt: string, messages: { role: string; content: string }[]): AsyncGenerator<string, void, unknown> {
+    // For Gemini MVP, we will concatenate the conversation into a single prompt to ensure context is preserved
+    // without handling the complex multi-turn JSON structure of the REST API yet.
     
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            contents: [
-                { role: "user", parts: [{ text: systemPrompt + "\n\n" + userPrompt }] } 
-                // Gemini System Instructions are supported in v1beta but passing as user prompt is often more reliable for simple implementations
-            ]
-        })
-    })
-
-    if (!response.ok) {
-        const errText = await response.text()
-        throw new Error(`Gemini API Error (${response.status}): ${errText}`)
+    let fullPrompt = systemPrompt + "\n\n"
+    for (const msg of messages) {
+        fullPrompt += `${msg.role.toUpperCase()}: ${msg.content}\n\n`
     }
+    fullPrompt += "ASSISTANT:"
 
-    const reader = response.body?.getReader()
-    if (!reader) throw new Error("Response body is not readable")
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        
-        buffer += decoder.decode(value, { stream: true })
-        
-        // Gemini sends a JSON array of objects, but streamed as distinct JSON objects often separated
-        // We need to be careful parsing. For simplicity in this raw fetch, we might need to handle the array structure.
-        // However, standard REST stream usually sends partial JSONs. 
-        // Actually, Gemini stream returns complete JSON objects in a list structure "[{...},\n{...}]"
-        
-        // A simpler robust parsing for Gemini REST stream:
-        // It often sends ",\r\n" as delimiter
-        
-        // Let's try a regex approach for the response chunks or accumulate valid JSON
-    }
-    
-    // Re-implementing Gemini with a simpler non-stream fetch for MVP stability if stream parsing is complex without the SDK?
-    // Or better: let's use the official simple pattern for parsing the stream if possible.
-    // Actually, for the MVP, let's switch Gemini to non-streaming or use a simpler line parser.
-    // But wait, let's do a proper stream parser.
-    
-    // Reset buffer for this new logic
-    // Gemini returns a JSON array `[` ... objects ... `]`
-    // Each chunk might contain part of that.
-    
-    // ALTERNATIVE: Just use the generateContent (non-stream) for Gemini MVP to ensure stability, 
-    // then upgrade to stream. Or better, use a known working stream parser.
-    
-    // Let's stick to OpenAI-compatible stream for now (Custom/OpenAI) as it's standard.
-    // For Gemini, I will implement a simple non-streaming fallback for this specific file version 
-    // to guarantee it works, then we can refine the stream parser.
-    
-    // RE-FETCHING for non-stream Gemini to ensure success
     const staticUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
     const staticResponse = await fetch(staticUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-             contents: [{ parts: [{ text: systemPrompt + "\n\n" + userPrompt }] }]
+             contents: [{ parts: [{ text: fullPrompt }] }]
         })
     })
     

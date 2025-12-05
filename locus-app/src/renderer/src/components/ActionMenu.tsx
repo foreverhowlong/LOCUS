@@ -35,6 +35,7 @@ export function ActionMenu({ position, onSelect }: ActionMenuProps) {
 
   return (
     <div 
+       onMouseDown={(e) => e.preventDefault()}
        className="fixed z-50 flex flex-col overflow-hidden rounded-xl bg-charcoal p-2 shadow-2xl transition-all duration-200 ease-out border border-stone-700"
        style={{ 
          top: position.y + 20, // Position slightly below selection for better visibility
